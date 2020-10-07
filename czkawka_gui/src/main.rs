@@ -18,7 +18,7 @@ use gtk::{Builder, SelectionMode, TreeIter, TreeView};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::{env, fs, process};
+use std::{env, fs, process, thread};
 
 fn main() {
     let mut exit_program_after_initialization: bool = false;
@@ -171,6 +171,18 @@ fn main() {
     // Upper notebook
     let scrolled_window_included_directories: gtk::ScrolledWindow = builder.get_object("scrolled_window_included_directories").unwrap();
     let scrolled_window_excluded_directories: gtk::ScrolledWindow = builder.get_object("scrolled_window_excluded_directories").unwrap();
+
+    //// Threads
+    // Messages
+    enum Message {
+        UpdateDuplicates(DuplicateFinder),
+        UpdateEmptyFolders(EmptyFolder),
+        UpdateEmptyFiles(EmptyFiles),
+        UpdateBigFiles(BigFile),
+        UpdateTemporary(Temporary),
+    }
+    // Sender/Reciver
+    let (sender, receiver) = glib::MainContext::channel(glib::PRIORITY_DEFAULT);
 
     //// Setup default look for
     {
@@ -422,11 +434,9 @@ fn main() {
             {
                 let buttons_delete = buttons_delete.clone();
                 let buttons_save = buttons_save.clone();
-                let buttons_select = buttons_select.clone();
                 let entry_info = entry_info.clone();
                 let notebook_main_children_names = notebook_main_children_names.clone();
                 let notebook_main = notebook_main.clone();
-                let scrolled_window_duplicate_finder = scrolled_window_duplicate_finder.clone();
                 let scrolled_window_main_empty_folder_finder = scrolled_window_main_empty_folder_finder.clone();
                 let scrolled_window_main_empty_files_finder = scrolled_window_main_empty_files_finder.clone();
                 let scrolled_window_main_temporary_files_finder = scrolled_window_main_temporary_files_finder.clone();
@@ -434,7 +444,6 @@ fn main() {
                 let scrolled_window_included_directories = scrolled_window_included_directories.clone();
                 let scrolled_window_excluded_directories = scrolled_window_excluded_directories.clone();
                 let text_view_errors = text_view_errors.clone();
-                let shared_duplication_state = shared_duplication_state.clone();
                 let shared_empty_folders_state = shared_empty_folders_state.clone();
                 let shared_empty_files_state = shared_empty_files_state.clone();
                 let shared_temporary_files_state = shared_temporary_files_state.clone();
@@ -443,9 +452,6 @@ fn main() {
                 buttons_search.connect_clicked(move |_| {
                     match notebook_main_children_names.get(notebook_main.get_current_page().unwrap() as usize).unwrap().as_str() {
                         "notebook_main_duplicate_finder_label" => {
-                            // Find duplicates
-
-                            let mut df = DuplicateFinder::new();
                             let check_method;
                             if radio_button_size.get_active() {
                                 check_method = duplicate::CheckingMethod::Size;
@@ -456,151 +462,33 @@ fn main() {
                             } else {
                                 panic!("No radio button is pressed");
                             }
-                            {
-                                df.set_included_directory(get_string_from_list_store(&scrolled_window_included_directories));
-                                df.set_excluded_directory(get_string_from_list_store(&scrolled_window_excluded_directories));
-                                df.set_recursive_search(check_button_recursive.get_active());
-                                df.set_excluded_items(entry_excluded_items.get_text().as_str().to_string());
-                                df.set_allowed_extensions(entry_allowed_extensions.get_text().as_str().to_string());
-                                df.set_minimal_file_size(match entry_duplicate_minimal_size.get_text().as_str().parse::<u64>() {
-                                    Ok(t) => t,
-                                    Err(_) => 1024, // By default
-                                });
-                                df.set_check_method(check_method.clone());
-                                df.set_delete_method(duplicate::DeleteMethod::None);
+                            let included_directories = get_string_from_list_store(&scrolled_window_included_directories);
+                            let excluded_directories = get_string_from_list_store(&scrolled_window_excluded_directories);
+                            let recursive_search = check_button_recursive.get_active();
+                            let excluded_items = entry_excluded_items.get_text().as_str().to_string();
+                            let allowed_extensions = entry_allowed_extensions.get_text().as_str().to_string();
+                            let minimal_file_size = match entry_duplicate_minimal_size.get_text().as_str().parse::<u64>() {
+                                Ok(t) => t,
+                                Err(_) => 1024, // By default
+                            };
+                            let delete_method = duplicate::DeleteMethod::None;
+
+                            let sender = sender.clone();
+
+                            // Find duplicates
+                            thread::spawn(move || {
+                                let mut df = DuplicateFinder::new();
+                                df.set_included_directory(included_directories);
+                                df.set_excluded_directory(excluded_directories);
+                                df.set_recursive_search(recursive_search);
+                                df.set_excluded_items(excluded_items);
+                                df.set_allowed_extensions(allowed_extensions);
+                                df.set_minimal_file_size(minimal_file_size);
+                                df.set_check_method(check_method);
+                                df.set_delete_method(delete_method);
                                 df.find_duplicates();
-                            }
-                            let information = df.get_information();
-                            let text_messages = df.get_text_messages();
-
-                            let duplicates_number: usize;
-                            let duplicates_size: u64;
-                            let duplicates_group: usize;
-
-                            match check_method {
-                                CheckingMethod::Hash | CheckingMethod::HashMB => {
-                                    duplicates_number = information.number_of_duplicated_files_by_hash;
-                                    duplicates_size = information.lost_space_by_hash;
-                                    duplicates_group = information.number_of_groups_by_hash;
-                                }
-                                CheckingMethod::Size => {
-                                    duplicates_number = information.number_of_duplicated_files_by_size;
-                                    duplicates_size = information.lost_space_by_size;
-                                    duplicates_group = information.number_of_groups_by_size;
-                                }
-                                CheckingMethod::None => {
-                                    panic!();
-                                }
-                            }
-
-                            entry_info.set_text(format!("Found {} duplicates files in {} groups which took {}.", duplicates_number, duplicates_group, duplicates_size.file_size(options::BINARY).unwrap()).as_str());
-
-                            // Create GUI
-                            {
-                                let list_store = scrolled_window_duplicate_finder
-                                    .get_children()
-                                    .get(0)
-                                    .unwrap()
-                                    .clone()
-                                    .downcast::<gtk::TreeView>()
-                                    .unwrap()
-                                    .get_model()
-                                    .unwrap()
-                                    .downcast::<gtk::ListStore>()
-                                    .unwrap();
-                                list_store.clear();
-
-                                let col_indices = [0, 1, 2, 3, 4, 5];
-
-                                match check_method {
-                                    CheckingMethod::Hash | CheckingMethod::HashMB => {
-                                        let btreemap = df.get_files_sorted_by_hash();
-
-                                        for (size, vectors_vector) in btreemap.iter().rev() {
-                                            for vector in vectors_vector {
-                                                let values: [&dyn ToValue; 6] = [
-                                                    &(vector.len().to_string() + " x " + size.to_string().as_str()),
-                                                    &(format!("{} ({} bytes) lost", ((vector.len() - 1) as u64 * *size as u64).file_size(options::BINARY).unwrap(), (vector.len() - 1) as u64 * *size as u64)),
-                                                    &"".to_string(), // No text in 3 column
-                                                    &(0),            // Not used here
-                                                    &(HEADER_ROW_COLOR.to_string()),
-                                                    &(TEXT_COLOR.to_string()),
-                                                ];
-                                                list_store.set(&list_store.append(), &col_indices, &values);
-                                                for entry in vector {
-                                                    let path = &entry.path;
-                                                    let index = path.rfind('/').unwrap();
-
-                                                    let values: [&dyn ToValue; 6] = [
-                                                        &(path[index + 1..].to_string()),
-                                                        &(path[..index].to_string()),
-                                                        &(NaiveDateTime::from_timestamp(entry.modified_date as i64, 0).to_string()),
-                                                        &(entry.modified_date),
-                                                        &(MAIN_ROW_COLOR.to_string()),
-                                                        &(TEXT_COLOR.to_string()),
-                                                    ];
-                                                    list_store.set(&list_store.append(), &col_indices, &values);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    CheckingMethod::Size => {
-                                        let btreemap = df.get_files_sorted_by_size();
-
-                                        for (size, vector) in btreemap.iter().rev() {
-                                            let values: [&dyn ToValue; 6] = [
-                                                &(vector.len().to_string() + " x " + size.to_string().as_str()),
-                                                &(format!("{} ({} bytes) lost", ((vector.len() - 1) as u64 * *size as u64).file_size(options::BINARY).unwrap(), (vector.len() - 1) as u64 * *size as u64)),
-                                                &"".to_string(), // No text in 3 column
-                                                &(0),            // Not used here
-                                                &(HEADER_ROW_COLOR.to_string()),
-                                                &(TEXT_COLOR.to_string()),
-                                            ];
-                                            list_store.set(&list_store.append(), &col_indices, &values);
-                                            for entry in vector {
-                                                let path = &entry.path;
-                                                let index = path.rfind('/').unwrap();
-
-                                                let values: [&dyn ToValue; 6] = [
-                                                    &(path[index + 1..].to_string()),
-                                                    &(path[..index].to_string()),
-                                                    &(NaiveDateTime::from_timestamp(entry.modified_date as i64, 0).to_string()),
-                                                    &(entry.modified_date),
-                                                    &(MAIN_ROW_COLOR.to_string()),
-                                                    &(TEXT_COLOR.to_string()),
-                                                ];
-                                                list_store.set(&list_store.append(), &col_indices, &values);
-                                            }
-                                        }
-                                    }
-                                    CheckingMethod::None => {
-                                        panic!();
-                                    }
-                                }
-
-                                print_text_messages_to_text_view(&text_messages, &text_view_errors);
-                            }
-
-                            // Set state
-                            {
-                                *shared_duplication_state.borrow_mut() = df;
-
-                                if duplicates_size > 0 {
-                                    buttons_save.show();
-                                    buttons_delete.show();
-                                    buttons_select.show();
-                                    *shared_buttons.borrow_mut().get_mut("duplicate").unwrap().get_mut("save").unwrap() = true;
-                                    *shared_buttons.borrow_mut().get_mut("duplicate").unwrap().get_mut("delete").unwrap() = true;
-                                    *shared_buttons.borrow_mut().get_mut("duplicate").unwrap().get_mut("select").unwrap() = true;
-                                } else {
-                                    buttons_save.hide();
-                                    buttons_delete.hide();
-                                    buttons_select.hide();
-                                    *shared_buttons.borrow_mut().get_mut("duplicate").unwrap().get_mut("save").unwrap() = false;
-                                    *shared_buttons.borrow_mut().get_mut("duplicate").unwrap().get_mut("delete").unwrap() = false;
-                                    *shared_buttons.borrow_mut().get_mut("duplicate").unwrap().get_mut("select").unwrap() = false;
-                                }
-                            }
+                                let _ = sender.send(Message::UpdateDuplicates(df));
+                            });
                         }
                         "scrolled_window_main_empty_folder_finder" => {
                             // Find empty folders
@@ -866,6 +754,9 @@ fn main() {
             }
             // Delete button
             {
+                let buttons_delete = buttons_delete.clone();
+                let scrolled_window_duplicate_finder = scrolled_window_duplicate_finder.clone();
+                let text_view_errors = text_view_errors.clone();
                 let scrolled_window_duplicate_finder = scrolled_window_duplicate_finder.clone();
                 let notebook_main_children_names = notebook_main_children_names.clone();
                 let notebook_main = notebook_main.clone();
@@ -1049,6 +940,7 @@ fn main() {
                 let notebook_main = notebook_main.clone();
                 let buttons_select_clone = buttons_select.clone();
                 let popover_select = popover_select.clone();
+                let buttons_select = buttons_select.clone();
                 buttons_select_clone.connect_clicked(move |_| match notebook_main_children_names.get(notebook_main.get_current_page().unwrap() as usize).unwrap().as_str() {
                     "notebook_main_duplicate_finder_label" => {
                         // Only popup popup
@@ -1072,7 +964,11 @@ fn main() {
             }
             // Save button
             {
+                let shared_buttons = shared_buttons.clone();
                 let buttons_save_clone = buttons_save.clone();
+                let buttons_save = buttons_save.clone();
+                let entry_info = entry_info.clone();
+                let shared_duplication_state = shared_duplication_state.clone();
                 buttons_save_clone.connect_clicked(move |_| match notebook_main_children_names.get(notebook_main.get_current_page().unwrap() as usize).unwrap().as_str() {
                     "notebook_main_duplicate_finder_label" => {
                         let file_name = "results_duplicates.txt";
@@ -1394,7 +1290,7 @@ fn main() {
             }
             // All one newest
             {
-                // let scrolled_window_duplicate_finder = scrolled_window_duplicate_finder.clone();
+                let scrolled_window_duplicate_finder = scrolled_window_duplicate_finder.clone();
                 // let popover_select = popover_select.clone();
                 buttons_popover_select_one_newest.connect_clicked(move |_| {
                     let tree_view = scrolled_window_duplicate_finder.get_children().get(0).unwrap().clone().downcast::<gtk::TreeView>().unwrap();
@@ -1545,6 +1441,170 @@ fn main() {
             }
         }
     }
+
+    let buttons_delete = buttons_delete.clone();
+    let buttons_save = buttons_save.clone();
+    let buttons_select = buttons_select.clone();
+    let entry_info = entry_info.clone();
+    let scrolled_window_duplicate_finder = scrolled_window_duplicate_finder.clone();
+    let text_view_errors = text_view_errors.clone();
+    let shared_duplication_state = shared_duplication_state.clone();
+    let shared_buttons = shared_buttons.clone();
+    // Wait for ending of search:
+    // Unblock left notebook bar
+    // Show proper buttons
+    receiver.attach(None, move |msg| {
+        match msg {
+            Message::UpdateDuplicates(df) => {
+                let information = df.get_information();
+                let text_messages = df.get_text_messages();
+
+                let duplicates_number: usize;
+                let duplicates_size: u64;
+                let duplicates_group: usize;
+
+                match df.get_check_method() {
+                    CheckingMethod::Hash | CheckingMethod::HashMB => {
+                        duplicates_number = information.number_of_duplicated_files_by_hash;
+                        duplicates_size = information.lost_space_by_hash;
+                        duplicates_group = information.number_of_groups_by_hash;
+                    }
+                    CheckingMethod::Size => {
+                        duplicates_number = information.number_of_duplicated_files_by_size;
+                        duplicates_size = information.lost_space_by_size;
+                        duplicates_group = information.number_of_groups_by_size;
+                    }
+                    CheckingMethod::None => {
+                        panic!();
+                    }
+                }
+
+                entry_info.set_text(format!("Found {} duplicates files in {} groups which took {}.", duplicates_number, duplicates_group, duplicates_size.file_size(options::BINARY).unwrap()).as_str());
+
+                // Create GUI
+                {
+                    let list_store = scrolled_window_duplicate_finder
+                        .get_children()
+                        .get(0)
+                        .unwrap()
+                        .clone()
+                        .downcast::<gtk::TreeView>()
+                        .unwrap()
+                        .get_model()
+                        .unwrap()
+                        .downcast::<gtk::ListStore>()
+                        .unwrap();
+                    list_store.clear();
+
+                    let col_indices = [0, 1, 2, 3, 4, 5];
+
+                    match df.get_check_method() {
+                        CheckingMethod::Hash | CheckingMethod::HashMB => {
+                            let btreemap = df.get_files_sorted_by_hash();
+
+                            for (size, vectors_vector) in btreemap.iter().rev() {
+                                for vector in vectors_vector {
+                                    let values: [&dyn ToValue; 6] = [
+                                        &(vector.len().to_string() + " x " + size.to_string().as_str()),
+                                        &(format!("{} ({} bytes) lost", ((vector.len() - 1) as u64 * *size as u64).file_size(options::BINARY).unwrap(), (vector.len() - 1) as u64 * *size as u64)),
+                                        &"".to_string(), // No text in 3 column
+                                        &(0),            // Not used here
+                                        &(HEADER_ROW_COLOR.to_string()),
+                                        &(TEXT_COLOR.to_string()),
+                                    ];
+                                    list_store.set(&list_store.append(), &col_indices, &values);
+                                    for entry in vector {
+                                        let path = &entry.path;
+                                        let index = path.rfind('/').unwrap();
+
+                                        let values: [&dyn ToValue; 6] = [
+                                            &(path[index + 1..].to_string()),
+                                            &(path[..index].to_string()),
+                                            &(NaiveDateTime::from_timestamp(entry.modified_date as i64, 0).to_string()),
+                                            &(entry.modified_date),
+                                            &(MAIN_ROW_COLOR.to_string()),
+                                            &(TEXT_COLOR.to_string()),
+                                        ];
+                                        list_store.set(&list_store.append(), &col_indices, &values);
+                                    }
+                                }
+                            }
+                        }
+                        CheckingMethod::Size => {
+                            let btreemap = df.get_files_sorted_by_size();
+
+                            for (size, vector) in btreemap.iter().rev() {
+                                let values: [&dyn ToValue; 6] = [
+                                    &(vector.len().to_string() + " x " + size.to_string().as_str()),
+                                    &(format!("{} ({} bytes) lost", ((vector.len() - 1) as u64 * *size as u64).file_size(options::BINARY).unwrap(), (vector.len() - 1) as u64 * *size as u64)),
+                                    &"".to_string(), // No text in 3 column
+                                    &(0),            // Not used here
+                                    &(HEADER_ROW_COLOR.to_string()),
+                                    &(TEXT_COLOR.to_string()),
+                                ];
+                                list_store.set(&list_store.append(), &col_indices, &values);
+                                for entry in vector {
+                                    let path = &entry.path;
+                                    let index = path.rfind('/').unwrap();
+
+                                    let values: [&dyn ToValue; 6] = [
+                                        &(path[index + 1..].to_string()),
+                                        &(path[..index].to_string()),
+                                        &(NaiveDateTime::from_timestamp(entry.modified_date as i64, 0).to_string()),
+                                        &(entry.modified_date),
+                                        &(MAIN_ROW_COLOR.to_string()),
+                                        &(TEXT_COLOR.to_string()),
+                                    ];
+                                    list_store.set(&list_store.append(), &col_indices, &values);
+                                }
+                            }
+                        }
+                        CheckingMethod::None => {
+                            panic!();
+                        }
+                    }
+
+                    print_text_messages_to_text_view(&text_messages, &text_view_errors);
+                }
+
+                // Set state
+                {
+                    *shared_duplication_state.borrow_mut() = df;
+
+                    if duplicates_size > 0 {
+                        buttons_save.show();
+                        buttons_delete.show();
+                        buttons_select.show();
+                        *shared_buttons.borrow_mut().get_mut("duplicate").unwrap().get_mut("save").unwrap() = true;
+                        *shared_buttons.borrow_mut().get_mut("duplicate").unwrap().get_mut("delete").unwrap() = true;
+                        *shared_buttons.borrow_mut().get_mut("duplicate").unwrap().get_mut("select").unwrap() = true;
+                    } else {
+                        buttons_save.hide();
+                        buttons_delete.hide();
+                        buttons_select.hide();
+                        *shared_buttons.borrow_mut().get_mut("duplicate").unwrap().get_mut("save").unwrap() = false;
+                        *shared_buttons.borrow_mut().get_mut("duplicate").unwrap().get_mut("delete").unwrap() = false;
+                        *shared_buttons.borrow_mut().get_mut("duplicate").unwrap().get_mut("select").unwrap() = false;
+                    }
+                }
+            }
+            Message::UpdateEmptyFolders(_ef) => {
+
+            }
+            Message::UpdateEmptyFiles(_ef) => {
+
+            }
+            Message::UpdateBigFiles(_bf) => {
+
+            }
+            Message::UpdateTemporary(_bf) => {
+
+            }
+        }
+        // Returning false here would close the receiver
+        // and have senders fail
+        glib::Continue(true)
+    });
 
     // Quit the program when X in main window was clicked
     window_main.connect_delete_event(|_, _| {
