@@ -339,6 +339,7 @@ fn main() {
             let buttons_select = buttons_select.clone();
             let buttons_delete = buttons_delete.clone();
             let buttons_save = buttons_save.clone();
+            let buttons_stop = buttons_stop.clone();
 
             let notebook_main_children_names = notebook_main_children_names.clone();
 
@@ -449,7 +450,21 @@ fn main() {
                 let shared_temporary_files_state = shared_temporary_files_state.clone();
                 let shared_big_files_state = shared_big_files_state.clone();
                 let shared_buttons = shared_buttons.clone();
-                buttons_search.connect_clicked(move |_| {
+                let buttons_search = buttons_search.clone();
+                let buttons_search_clone = buttons_search.clone();
+                let buttons_stop = buttons_stop.clone();
+                buttons_search_clone.connect_clicked(move |_| {
+                    let included_directories = get_string_from_list_store(&scrolled_window_included_directories);
+                    let excluded_directories = get_string_from_list_store(&scrolled_window_excluded_directories);
+                    let recursive_search = check_button_recursive.get_active();
+                    let excluded_items = entry_excluded_items.get_text().as_str().to_string();
+                    let allowed_extensions = entry_allowed_extensions.get_text().as_str().to_string();
+
+                    buttons_search.hide();
+                    buttons_stop.hide(); // TODO
+
+                    entry_info.set_text("Searching data, please wait...");
+
                     match notebook_main_children_names.get(notebook_main.get_current_page().unwrap() as usize).unwrap().as_str() {
                         "notebook_main_duplicate_finder_label" => {
                             let check_method;
@@ -462,11 +477,6 @@ fn main() {
                             } else {
                                 panic!("No radio button is pressed");
                             }
-                            let included_directories = get_string_from_list_store(&scrolled_window_included_directories);
-                            let excluded_directories = get_string_from_list_store(&scrolled_window_excluded_directories);
-                            let recursive_search = check_button_recursive.get_active();
-                            let excluded_items = entry_excluded_items.get_text().as_str().to_string();
-                            let allowed_extensions = entry_allowed_extensions.get_text().as_str().to_string();
                             let minimal_file_size = match entry_duplicate_minimal_size.get_text().as_str().parse::<u64>() {
                                 Ok(t) => t,
                                 Err(_) => 1024, // By default
@@ -491,64 +501,17 @@ fn main() {
                             });
                         }
                         "scrolled_window_main_empty_folder_finder" => {
+                            let sender = sender.clone();
+
                             // Find empty folders
-                            let mut ef = EmptyFolder::new();
+                            thread::spawn(move || {
+                                let mut ef = EmptyFolder::new();
+                                ef.set_included_directory(included_directories);
+                                ef.set_delete_folder(false);
+                                ef.find_empty_folders();
+                                let _ = sender.send(Message::UpdateEmptyFolders(ef));
+                            });
 
-                            ef.set_included_directory(get_string_from_list_store(&scrolled_window_included_directories));
-                            ef.set_delete_folder(false);
-                            ef.find_empty_folders();
-
-                            let information = ef.get_information();
-                            let text_messages = ef.get_text_messages();
-
-                            let empty_folder_number: usize = information.number_of_empty_folders;
-
-                            entry_info.set_text(format!("Found {} empty folders.", empty_folder_number).as_str());
-
-                            // Create GUI
-                            {
-                                let list_store = scrolled_window_main_empty_folder_finder
-                                    .get_children()
-                                    .get(0)
-                                    .unwrap()
-                                    .clone()
-                                    .downcast::<gtk::TreeView>()
-                                    .unwrap()
-                                    .get_model()
-                                    .unwrap()
-                                    .downcast::<gtk::ListStore>()
-                                    .unwrap();
-                                list_store.clear();
-
-                                let col_indices = [0, 1, 2];
-
-                                let hashmap = ef.get_empty_folder_list();
-
-                                for (name, entry) in hashmap {
-                                    let name: String = name[..(name.len() - 1)].to_string();
-                                    let index = name.rfind('/').unwrap();
-                                    let values: [&dyn ToValue; 3] = [&(name[index + 1..].to_string()), &(name[..index].to_string()), &(NaiveDateTime::from_timestamp(entry.modified_date as i64, 0).to_string())];
-                                    list_store.set(&list_store.append(), &col_indices, &values);
-                                }
-                                print_text_messages_to_text_view(&text_messages, &text_view_errors);
-                            }
-
-                            // Set state
-                            {
-                                *shared_empty_folders_state.borrow_mut() = ef;
-
-                                if empty_folder_number > 0 {
-                                    buttons_save.show();
-                                    buttons_delete.show();
-                                    *shared_buttons.borrow_mut().get_mut("empty_folder").unwrap().get_mut("save").unwrap() = true;
-                                    *shared_buttons.borrow_mut().get_mut("empty_folder").unwrap().get_mut("delete").unwrap() = true;
-                                } else {
-                                    buttons_save.hide();
-                                    buttons_delete.hide();
-                                    *shared_buttons.borrow_mut().get_mut("empty_folder").unwrap().get_mut("save").unwrap() = false;
-                                    *shared_buttons.borrow_mut().get_mut("empty_folder").unwrap().get_mut("delete").unwrap() = false;
-                                }
-                            }
                         }
                         "scrolled_window_main_empty_files_finder" => {
                             // Find empty files
@@ -757,10 +720,10 @@ fn main() {
                 let buttons_delete = buttons_delete.clone();
                 let scrolled_window_duplicate_finder = scrolled_window_duplicate_finder.clone();
                 let text_view_errors = text_view_errors.clone();
-                let scrolled_window_duplicate_finder = scrolled_window_duplicate_finder.clone();
                 let notebook_main_children_names = notebook_main_children_names.clone();
                 let notebook_main = notebook_main.clone();
                 let window_main = window_main.clone();
+                let scrolled_window_main_empty_folder_finder = scrolled_window_main_empty_folder_finder.clone();
 
                 buttons_delete.connect_clicked(move |_| {
                     if *shared_confirmation_dialog_delete_dialog_showing_state.borrow_mut() {
@@ -969,6 +932,7 @@ fn main() {
                 let buttons_save = buttons_save.clone();
                 let entry_info = entry_info.clone();
                 let shared_duplication_state = shared_duplication_state.clone();
+                let shared_empty_folders_state = shared_empty_folders_state.clone();
                 buttons_save_clone.connect_clicked(move |_| match notebook_main_children_names.get(notebook_main.get_current_page().unwrap() as usize).unwrap().as_str() {
                     "notebook_main_duplicate_finder_label" => {
                         let file_name = "results_duplicates.txt";
@@ -1445,6 +1409,8 @@ fn main() {
     let buttons_delete = buttons_delete.clone();
     let buttons_save = buttons_save.clone();
     let buttons_select = buttons_select.clone();
+    let buttons_search = buttons_search.clone();
+    let buttons_stop = buttons_stop.clone();
     let entry_info = entry_info.clone();
     let scrolled_window_duplicate_finder = scrolled_window_duplicate_finder.clone();
     let text_view_errors = text_view_errors.clone();
@@ -1454,8 +1420,12 @@ fn main() {
     // Unblock left notebook bar
     // Show proper buttons
     receiver.attach(None, move |msg| {
+        buttons_search.show();
+        buttons_stop.hide();
+
         match msg {
             Message::UpdateDuplicates(df) => {
+
                 let information = df.get_information();
                 let text_messages = df.get_text_messages();
 
@@ -1588,18 +1558,61 @@ fn main() {
                     }
                 }
             }
-            Message::UpdateEmptyFolders(_ef) => {
+            Message::UpdateEmptyFolders(ef) => {
+                let information = ef.get_information();
+                let text_messages = ef.get_text_messages();
 
-            }
-            Message::UpdateEmptyFiles(_ef) => {
+                let empty_folder_number: usize = information.number_of_empty_folders;
 
-            }
-            Message::UpdateBigFiles(_bf) => {
+                entry_info.set_text(format!("Found {} empty folders.", empty_folder_number).as_str());
 
-            }
-            Message::UpdateTemporary(_bf) => {
+                // Create GUI
+                {
+                    let list_store = scrolled_window_main_empty_folder_finder
+                        .get_children()
+                        .get(0)
+                        .unwrap()
+                        .clone()
+                        .downcast::<gtk::TreeView>()
+                        .unwrap()
+                        .get_model()
+                        .unwrap()
+                        .downcast::<gtk::ListStore>()
+                        .unwrap();
+                    list_store.clear();
 
-            }
+                    let col_indices = [0, 1, 2];
+
+                    let hashmap = ef.get_empty_folder_list();
+
+                    for (name, entry) in hashmap {
+                        let name: String = name[..(name.len() - 1)].to_string();
+                        let index = name.rfind('/').unwrap();
+                        let values: [&dyn ToValue; 3] = [&(name[index + 1..].to_string()), &(name[..index].to_string()), &(NaiveDateTime::from_timestamp(entry.modified_date as i64, 0).to_string())];
+                        list_store.set(&list_store.append(), &col_indices, &values);
+                    }
+                    print_text_messages_to_text_view(&text_messages, &text_view_errors);
+                }
+
+                // Set state
+                {
+                    *shared_empty_folders_state.borrow_mut() = ef;
+
+                    if empty_folder_number > 0 {
+                        buttons_save.show();
+                        buttons_delete.show();
+                        *shared_buttons.borrow_mut().get_mut("empty_folder").unwrap().get_mut("save").unwrap() = true;
+                        *shared_buttons.borrow_mut().get_mut("empty_folder").unwrap().get_mut("delete").unwrap() = true;
+                    } else {
+                        buttons_save.hide();
+                        buttons_delete.hide();
+                        *shared_buttons.borrow_mut().get_mut("empty_folder").unwrap().get_mut("save").unwrap() = false;
+                        *shared_buttons.borrow_mut().get_mut("empty_folder").unwrap().get_mut("delete").unwrap() = false;
+                    }
+                }}
+            Message::UpdateEmptyFiles(_ef) => {}
+            Message::UpdateBigFiles(_bf) => {}
+            Message::UpdateTemporary(_bf) => {}
         }
         // Returning false here would close the receiver
         // and have senders fail
